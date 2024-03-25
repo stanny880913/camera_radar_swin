@@ -161,6 +161,17 @@ def cal_metrics(output, gt):
     
     score = output.squeeze(1).detach().cpu().numpy()
     label = label.detach().cpu().numpy()
+
+    # 检查是否有NaN或无穷大的值
+    if np.isnan(score).any() or np.isinf(score).any():
+        print("Warning: The output contains NaN or infinite values")
+
+    if np.isnan(label).any() or np.isinf(label).any():
+        print("Warning: The labels contain NaN or infinite values")
+
+    # 处理这些值，例如，用0替换NaN
+    score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
+    label = np.nan_to_num(label, nan=0.0, posinf=0.0, neginf=0.0)
     
     ap = average_precision_score(label, score)
     
@@ -207,7 +218,7 @@ def init_params(args, model, optimizer):
     loss_val_min = None
         
     if args.resume == True:
-        f_checkpoint = join(args.dir_result, 'checkpoint.tar')        
+        f_checkpoint = join(args.dir_result, 'checkpoint_dwn.tar')        
         if os.path.isfile(f_checkpoint):
             print('Resume training')
             checkpoint = torch.load(f_checkpoint)   
@@ -272,8 +283,8 @@ def main(args):
     
     train_ann_files = [join(args.dir_data, 'train.json')] 
     val_ann_files = [join(args.dir_data, 'val.json')]
-    # train_ann_files = [join(args.dir_data, 'train_mini.json')] 
-    # val_ann_files = [join(args.dir_data, 'val_mini.json')]
+    #train_ann_mini_files = [join(args.dir_data, 'train_mini.json')] 
+    #val_ann_mini_files = [join(args.dir_data, 'val_mini.json')]
     
     device0, available_gpu_ids = init_env()
     args.num_gpus = len(available_gpu_ids)

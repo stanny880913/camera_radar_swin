@@ -70,7 +70,7 @@ def main(args):
     
     if not args.dir_checkpoint:
         # args.dir_checkpoint = join(args.dir_data, 'fusion_data', 'train_result', 'radiant_pgd')
-        args.dir_checkpoint = "dir_results/swin"
+        args.dir_checkpoint = "dir_results/swin_DCN"
     
     args.out_path = join(args.dir_data, 'fusion_data', 'dwn_radiant_pgd')              
     mkdir(args.out_path) 
@@ -81,7 +81,7 @@ def main(args):
     model.init_weights()   
     model = MMDataParallel(model.to(device), device_ids=available_gpu_ids)
     
-    f_checkpoint = join(args.dir_checkpoint, 'checkpoint_swin.tar')        
+    f_checkpoint = join(args.dir_checkpoint, 'checkpoint_branch.tar')        
     if os.path.isfile(f_checkpoint):
         print('load model')
         checkpoint = torch.load(f_checkpoint)                    
@@ -89,10 +89,12 @@ def main(args):
     else:
         sys.exit('checkpoint not found') 
         
-    ann_files = dict(train_mini = train_ann_file_mini,
-                    val_mini = val_ann_file_mini,
-                    train = train_ann_file,
-                    val = val_ann_file)    
+    # ann_files = dict(train_mini = train_ann_file_mini,
+    #                 val_mini = val_ann_file_mini,
+    #                 train = train_ann_file,
+    #                 val = val_ann_file)    
+    ann_files = dict(train = train_ann_file,
+                val = val_ann_file)  
     
     if args.select_data is not None:       
         assert args.select_data in ann_files
@@ -109,8 +111,8 @@ if __name__ == '__main__':
     parser.add_argument('--select_data', type=str)  
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--samples_per_gpu', type=int, default=1) 
-    parser.add_argument('--workers_per_gpu', type=int, default=2)  
+    parser.add_argument('--samples_per_gpu', type=int, default=4) 
+    parser.add_argument('--workers_per_gpu', type=int, default=4)  
    
     args = parser.parse_args()
     main(args)

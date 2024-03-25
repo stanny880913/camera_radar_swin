@@ -288,16 +288,9 @@ class SingleStageDetector(BaseDetector):
         #x_cat[2].shape =[1,1280,58,100] 
         #x_cat[3].shape =[1,2560,29,50] 
 
-        # INFO use swin transformer to fuse data
+        # INFO use swin transformer to fuse data(concat one output)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        swin_x_cat = []  
-        # for i in range(len(x_cat) - 1):
-        #     input_channels = x_cat[i].shape[1]
-        #     output_channels = x_cat[i + 1].shape[1]
-        #     swin_block = SwinTransformerBlock(input_channels, output_channels).to(device)
-
-        #     transformed_x = swin_block.forward(x_cat[i].to(device))  
-        #     swin_x_cat.append(transformed_x)  
+        swin_x_cat = []   
         for i in range(4):
             input_channels = x_cat[i].shape[1]
             output_channels = input_channels
@@ -305,10 +298,7 @@ class SingleStageDetector(BaseDetector):
             transformed_x = swin_block.forward(x_cat[i].to(device))  
             swin_x_cat.append(transformed_x)
 
-        #BUG Swin
         for i in range(3):
-            # swin_x_cat_tuple_to_tensor = torch.tensor(swin_x_cat[i+1])
-            # swin_x_cat[i+1] = self.fusion_convs[i](swin_x_cat_tuple_to_tensor)
             swin_x_cat[i+1] = self.fusion_convs[i](swin_x_cat[i+1])
 
         x_img = self.neck_img(x_img)

@@ -99,6 +99,7 @@ def clip_grads(params, grad_clip=dict(max_norm=35, norm_type=2)):
     params = list(filter(lambda p: p.requires_grad and p.grad is not None, params))
     if len(params) > 0:
         return clip_grad.clip_grad_norm_(params, **grad_clip)
+
 def single_gpu_test(model, model_mlp, data_loader):
     """Test model with single gpu.
 
@@ -257,7 +258,7 @@ def init_params(args, model, optimizer):
     loss_val_min = None
 
     if args.resume == True:
-        f_checkpoint = join(args.dir_result, "checkpoint.tar")
+        f_checkpoint = join(args.dir_result, "checkpoint_branch.tar")
         if os.path.isfile(f_checkpoint):
             print("Resume training")
             checkpoint = torch.load(f_checkpoint)
@@ -316,7 +317,7 @@ def save_checkpoint(
         "state_dict_best": state_dict_best,
     }
 
-    torch.save(state, join(args.dir_result, "checkpoint.tar"))
+    torch.save(state, join(args.dir_result, "checkpoint_branch.tar"))
     return state
 
 
@@ -483,8 +484,7 @@ def main(args):
     if args.do_eval:
         f_checkpoint_mlp = join(
             args.dir_result,
-            "train_mini",
-            "concat_radar/"
+            "swin_trainval",
             "checkpoint_dwn.tar"
         )
         model_mlp = FusionMLP()
@@ -492,8 +492,8 @@ def main(args):
         model_mlp.load_state_dict(filter_state_dict_keys(checkpoint_mlp["state_dict"]))
 
         data_loader = init_data_loader(args, NuScenesFusionDataset, "test")
-        # f_checkpoint = join(args.dir_result, "pre_checkpoint_branch.tar") 
-        f_checkpoint = join(args.dir_result, "train_mini/concat_radar/checkpoint_branch.tar")
+        # set radar branch model
+        f_checkpoint = join(args.dir_result, "swin_trainval/checkpoint_branch.tar")
         if os.path.isfile(f_checkpoint):
             print("load model")
             checkpoint = torch.load(f_checkpoint)
@@ -531,12 +531,12 @@ if __name__ == "__main__":
         default=False,
         help="resume training from checkpoint",
     )
-    parser.add_argument("--num_gpus", type=int, default=4)
+    parser.add_argument("--num_gpus", type=int, default=1)
     parser.add_argument("--samples_per_gpu", type=int, default=2)
     parser.add_argument("--test_samples_per_gpu", type=int, default=1)
     parser.add_argument("--workers_per_gpu", type=int, default=2)
     parser.add_argument("--log_interval", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
+    parser.add_argument("--lr", type=float, default="0.001", help="Learning rate")
     parser.add_argument("--train_mini", action="store_true", default=True)
     parser.add_argument("--val_mini", type=bool, default=True)
 
