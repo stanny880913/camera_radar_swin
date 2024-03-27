@@ -263,60 +263,56 @@ class SingleStageDetector(BaseDetector):
 
         self.eval_mono = eval_mono
 
-
-            
- #INFO 特徵提取 x_other is the radar backbone output
+    #INFO 特徵提取 x_other is the radar backbone output
     def extract_feat(self, img, radar_map):
         # radar_map = [x[i], depth[i], 1, vx[i], vz[i], v_amplitude[i], vx_comp[i], vz_comp[i], v_comp_amplitude[i], rcs[i]]
         #img經過backbone 
         x_img = self.backbone_img(img)
         #radar經過backbone
+        x_other = self.backbone_other(radar_map)
         # x_other is len=4 tuple,and 
         # x_other[0].shape=[1,64,232,400]
         # x_other[1].shape=[1,128,116,200]
         # x_other[2].shape=[1,256,58,100]
         # x_other[3].shape=[1,512,29,50]
-        x_other = self.backbone_other(radar_map)
         
         # INFO Use concat to fusion data
         x_cat = []
         for x_i, x_o in zip(x_img, x_other):
             x_cat.append(torch.cat([x_i, x_o], dim=1))
-        
         #x_cat[0].shape = [1,320,232,400]
         #x_cat[1].shape =[1,640,116,200] 
         #x_cat[2].shape =[1,1280,58,100] 
         #x_cat[3].shape =[1,2560,29,50] 
 
-        # INFO use swin transformer to fuse data(concat one output)
+        # INFO use swin transformer to fuse data(img/radar各自輸出)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        swin_x_cat = []   
         for i in range(4):
             input_channels = x_cat[i].shape[1]
             output_channels = input_channels
-            swin_block = SwinTransformerBlock(input_channels, output_channels).to(device)
-            transformed_x = swin_block.forward(x_cat[i].to(device))  
-            swin_x_cat.append(transformed_x)
+            swin_img, swin_radar = SwinTransformerBlock(input_channels, output_channels).to(device)
 
+        # INFO concat swin feature to img branch
+        swin_branch_img = []
+        for i_swin in zip(swin_img):
+            swin_branch_img.append(torch.cat([i_swin], dim=1)) 
+
+        # INFO concat swin feature to radar branch
+        swin_branch_radar = []
+        for r_swin in zip(swin_radar):
+            swin_branch_radar.append(torch.cat([r_swin], dim=1)) 
+
+
+        # bottle neck
         for i in range(3):
-            swin_x_cat[i+1] = self.fusion_convs[i](swin_x_cat[i+1])
+            swin_cft_cat[i+1] = self.fusion_convs[i](swin_cft_cat[i+1])
 
+        # img FPN
         x_img = self.neck_img(x_img)
-        swin_x_cat = self.neck_fusion(swin_x_cat)
+        # radar FPN
+        swin_cft_cat = self.neck_fusion(swin_cft_cat)
 
-        return x_img, swin_x_cat
-
-        # INFO origin 
-        # #go through bottleneck, fusion_convs is bottleneck setting
-        # for i in range(3):
-        #     x_cat[i+1] = self.fusion_convs[i](x_cat[i+1])
-
-        # #img經過Cam Neck
-        # x_img = self.neck_img(x_img)
-        # #fusion經過Radar Neck
-        # x_cat = self.neck_fusion(x_cat)
-
-        # return x_img, x_cat
+        return x_img, swin_cft_cat
 
     def forward_dummy(self, img):
         """Used for computing network flops.

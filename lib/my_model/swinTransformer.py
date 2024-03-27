@@ -305,10 +305,13 @@ class SwinTransformerBlock(nn.Module):
         # remove input_resolution
         self.blocks = nn.Sequential(*[SwinTransformerLayer(dim=c2, num_heads=num_heads, window_size=window_size,
                                                            shift_size=0 if (i % 2 == 0) else window_size // 2) for i in range(num_layers)])
-
-    # INFO concat後的特徵，img和radar結合
+    
+    # INFO swin輸出各自特徵
     def forward(self, x):
-        if self.conv is not None:
-            x = self.conv(x)
-        x = self.blocks(x)
-        return x
+            if self.conv is not None:
+                x = self.conv(x)
+            x = self.blocks(x)
+            x_dim2 = int(x.shape[2]/2)
+            rgb_fea_out = x[:, :, :x_dim2, :]
+            radar_fea_out = x[:, :, x_dim2:, :]
+            return rgb_fea_out, radar_fea_out
