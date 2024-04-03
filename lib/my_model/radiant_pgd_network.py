@@ -20,6 +20,7 @@ from lib.my_model.cross_entropy_loss import CrossEntropyLoss
 from lib.my_model.bbox_coder import PGDBBoxCoder
 from lib.my_model.swinTransformer import SwinTransformerBlock
 
+
 loss_registry = dict(FocalLoss=FocalLoss, SmoothL1Loss=SmoothL1Loss, 
                      CrossEntropyLoss=CrossEntropyLoss,
                      GIoULoss = GIoULoss)
@@ -91,7 +92,7 @@ class BaseDetector(BaseModule, metaclass=ABCMeta):
                 img_meta[img_id]['batch_input_shape'] = tuple(img.size()[-2:])
 
         return self.simple_test(imgs[0], img_metas[0], **kwargs)
-    
+       
 
     @auto_fp16(apply_to=('img', )) 
     def forward(self, img, img_metas, return_loss=True, model_mlp=None, **kwargs):
@@ -154,6 +155,7 @@ class FusionConvBlock(BaseModule):
         self.norm1_name, norm1 = build_norm_layer(norm_cfg, planes, postfix=1)
         self.norm2_name, norm2 = build_norm_layer(norm_cfg, planes, postfix=2)
         self.norm3_name, norm3 = build_norm_layer(norm_cfg, outplanes, postfix=3)
+        # layer setting
         self.conv1 = build_conv_layer(
             conv_cfg,
             inplanes,
@@ -263,56 +265,73 @@ class SingleStageDetector(BaseDetector):
 
         self.eval_mono = eval_mono
 
-    #INFO 特徵提取 x_other is the radar backbone output
+
+            
+ #INFO 特徵提取 x_other is the radar backbone output
     def extract_feat(self, img, radar_map):
-        # radar_map = [x[i], depth[i], 1, vx[i], vz[i], v_amplitude[i], vx_comp[i], vz_comp[i], v_comp_amplitude[i], rcs[i]]
         #img經過backbone 
+        # x_img is len=4 tuple,and 
+        # x_img[0].shape=[1,256,232,400]
+        # x_img[1].shape=[1,512,116,200]
+        # x_img[2].shape=[1,1024,58,100]
+        # x_img[3].shape=[1,2048,29,50]
         x_img = self.backbone_img(img)
+
+        # radar_map = [x[i], depth[i], 1, vx[i], vz[i], v_amplitude[i], vx_comp[i], vz_comp[i], v_comp_amplitude[i], rcs[i]]
         #radar經過backbone
-        x_other = self.backbone_other(radar_map)
         # x_other is len=4 tuple,and 
         # x_other[0].shape=[1,64,232,400]
         # x_other[1].shape=[1,128,116,200]
         # x_other[2].shape=[1,256,58,100]
         # x_other[3].shape=[1,512,29,50]
+        x_other = self.backbone_other(radar_map)
         
         # INFO Use concat to fusion data
         x_cat = []
         for x_i, x_o in zip(x_img, x_other):
             x_cat.append(torch.cat([x_i, x_o], dim=1))
+        
         #x_cat[0].shape = [1,320,232,400]
         #x_cat[1].shape =[1,640,116,200] 
         #x_cat[2].shape =[1,1280,58,100] 
         #x_cat[3].shape =[1,2560,29,50] 
 
-        # INFO use swin transformer to fuse data(img/radar各自輸出)
+        # INFO use swin transformer to fuse data(concat one output)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        swin_img_list = [] 
+        swin_radar_list = []
         for i in range(4):
             input_channels = x_cat[i].shape[1]
             output_channels = input_channels
-            swin_img, swin_radar = SwinTransformerBlock(input_channels, output_channels).to(device)
+            swin_block = SwinTransformerBlock(input_channels, output_channels).to(device)
+            swin_img, swin_radar = swin_block.forward(x_cat[i].to(device))  
+            swin_img_list.append(swin_img)
+            swin_radar_list.append(swin_radar)
 
-        # INFO concat swin feature to img branch
+        # concat swin feature to img branch
         swin_branch_img = []
-        for i_swin in zip(swin_img):
-            swin_branch_img.append(torch.cat([i_swin], dim=1)) 
+        for origin_img, swin_img in zip(x_img, swin_img_list):
+            img_concat= torch.add(origin_img, swin_img)
+            swin_branch_img.append(img_concat)
 
-        # INFO concat swin feature to radar branch
+        # concat swin feature to radar branch
         swin_branch_radar = []
-        for r_swin in zip(swin_radar):
-            swin_branch_radar.append(torch.cat([r_swin], dim=1)) 
+        for origin_radar, r_swin in zip(x_other, swin_radar_list):
+            radar_concat = torch.add(origin_radar, r_swin)
+            swin_branch_radar.append(radar_concat)
 
+        #concat 2 branch feature
+        swin_cat = []
+        for final_img, final_radar in zip(swin_branch_img, swin_branch_radar):
+            swin_cat.append(torch.cat([final_img, final_radar], dim=1))
 
-        # bottle neck
         for i in range(3):
-            swin_cft_cat[i+1] = self.fusion_convs[i](swin_cft_cat[i+1])
+            swin_cat[i+1] = self.fusion_convs[i](swin_cat[i+1])
 
-        # img FPN
         x_img = self.neck_img(x_img)
-        # radar FPN
-        swin_cft_cat = self.neck_fusion(swin_cft_cat)
+        swin_cat = self.neck_fusion(swin_cat)
 
-        return x_img, swin_cft_cat
+        return x_img, swin_cat
 
     def forward_dummy(self, img):
         """Used for computing network flops.
@@ -465,7 +484,6 @@ class BaseMono3DDenseHead(BaseModule, metaclass=ABCMeta):
                       radar_pts=None,
                       proposal_cfg=None,
                       **kwargs):
-          
         outs = self(x_img, x_cat)
         loss_inputs = outs + (gt_bboxes, gt_labels, gt_bboxes_3d,
                               gt_labels_3d, centers2d, depths, attr_labels,

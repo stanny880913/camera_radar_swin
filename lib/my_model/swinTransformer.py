@@ -311,7 +311,15 @@ class SwinTransformerBlock(nn.Module):
             if self.conv is not None:
                 x = self.conv(x)
             x = self.blocks(x)
-            x_dim2 = int(x.shape[2]/2)
-            rgb_fea_out = x[:, :, :x_dim2, :]
-            radar_fea_out = x[:, :, x_dim2:, :]
+            # img : radar channels = 1 : 0.25
+            x_dim2 = int(x.shape[1]*0.2)
+            rgb_fea_out = x[:, x_dim2:, :, :]
+            radar_fea_out = x[:, :x_dim2,:,:]
             return rgb_fea_out, radar_fea_out
+
+    # INFO concat後的特徵，img和radar結合
+    # def forward(self, x):
+    #     if self.conv is not None:
+    #         x = self.conv(x)
+    #     x = self.blocks(x)
+    #     return xg
