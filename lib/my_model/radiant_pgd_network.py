@@ -18,7 +18,7 @@ from lib.my_model.focal_loss import FocalLoss
 from lib.my_model.smooth_l1_loss import SmoothL1Loss
 from lib.my_model.cross_entropy_loss import CrossEntropyLoss
 from lib.my_model.bbox_coder import PGDBBoxCoder
-from lib.my_model.swinTransformer import SwinTransformerBlock
+from lib.my_model.swinTransformerV2 import SwinTransformerBlockV2
 
 
 loss_registry = dict(FocalLoss=FocalLoss, SmoothL1Loss=SmoothL1Loss, 
@@ -303,7 +303,7 @@ class SingleStageDetector(BaseDetector):
         for i in range(4):
             input_channels = x_cat[i].shape[1]
             output_channels = input_channels
-            swin_block = SwinTransformerBlock(input_channels, output_channels).to(device)
+            swin_block = SwinTransformerBlockV2(input_channels, output_channels).to(device)
             swin_img, swin_radar = swin_block.forward(x_cat[i].to(device))  
             swin_img_list.append(swin_img)
             swin_radar_list.append(swin_radar)
