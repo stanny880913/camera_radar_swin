@@ -12,7 +12,9 @@ import _init_paths
 from lib.my_data_parallel import MMDataParallel
 from lib.my_dataloader import init_data_loader_from_file
 from lib.fusion_dataset import NuScenesFusionDataset
-from lib.my_model.radiant_pgd_network import PGDFusion3D
+from lib.my_model.radiant_pgd_network_lwa_concat import PGDFusion3D
+
+# os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 this_dir = os.path.dirname(__file__)
 path_config = join(this_dir, '..', 'lib', 'configs_radiant_pgd.py')
@@ -27,10 +29,9 @@ def mkdir(dir1):
             
 def init_env():    
     use_cuda = torch.cuda.is_available()    
-    device0 = torch.device('cuda:0' if use_cuda else 'cpu')    
+    device0 = torch.device('cuda' if use_cuda else 'cpu')    
     cudnn.benchmark = True if use_cuda else False
-    available_gpu_ids = [i for i in range(torch.cuda.device_count())]
-    
+    available_gpu_ids = list(range(torch.cuda.device_count())) if use_cuda else []  
     return device0, available_gpu_ids
 
         
@@ -70,9 +71,10 @@ def main(args):
     
     if not args.dir_checkpoint:
         # args.dir_checkpoint = join(args.dir_data, 'fusion_data', 'train_result', 'radiant_pgd')
-        args.dir_checkpoint = "dir_results/swin"
+        args.dir_checkpoint = "dir_results/server/ori_server/"
     
-    args.out_path = join(args.dir_data, 'fusion_data', 'dwn_radiant_pgd')              
+    # args.out_path = join(args.dir_data, 'fusion_data', 'dwn_radiant_pgd')
+    args.out_path = "dir_results"
     mkdir(args.out_path) 
             
     device, available_gpu_ids = init_env()
@@ -80,8 +82,8 @@ def main(args):
     model = PGDFusion3D(**cfg.model_args)
     model.init_weights()   
     model = MMDataParallel(model.to(device), device_ids=available_gpu_ids)
-    
-    f_checkpoint = join(args.dir_checkpoint, 'checkpoint_swin.tar')        
+
+    f_checkpoint = join(args.dir_checkpoint, 'checkpoint_branch.tar')        
     if os.path.isfile(f_checkpoint):
         print('load model')
         checkpoint = torch.load(f_checkpoint)                    
@@ -89,10 +91,12 @@ def main(args):
     else:
         sys.exit('checkpoint not found') 
         
-    ann_files = dict(train_mini = train_ann_file_mini,
-                    val_mini = val_ann_file_mini,
-                    train = train_ann_file,
-                    val = val_ann_file)    
+    # ann_files = dict(train_mini = train_ann_file_mini,
+    #                 val_mini = val_ann_file_mini,
+    #                 train = train_ann_file,
+    #                 val = val_ann_file)    
+    ann_files = dict(train = train_ann_file,
+                    val = val_ann_file) 
     
     if args.select_data is not None:       
         assert args.select_data in ann_files
@@ -104,14 +108,16 @@ def main(args):
     
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()    
-    parser.add_argument('--dir_data', type=str)
+    parser.add_argument('--dir_data', default="/root/workspace/camera_radar_swin_trainval/data/nuscenes",type=str)
     parser.add_argument('--dir_checkpoint', type=str)
     parser.add_argument('--select_data', type=str)  
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--samples_per_gpu', type=int, default=1) 
-    parser.add_argument('--workers_per_gpu', type=int, default=2)  
-   
+    parser.add_argument('--num_gpus', type=int, default=2)
+    parser.add_argument('--samples_per_gpu', type=int, default=2)
+    parser.add_argument('--workers_per_gpu', type=int, default=2)
+
     args = parser.parse_args()
     main(args)
 
+    # 記得去my_dataloader把batchsize調整成1
+    # command : CUDA_VISIBLE_DEVICES=0 python scripts/prepare_data_dwn_pgd.py

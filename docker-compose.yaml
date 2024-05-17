@@ -1,0 +1,21 @@
+version: '3.7'
+
+services:
+  radiant:
+    image: py38-cu117-torch113:v1.0
+    stdin_open: true
+    tty: true 
+    runtime: nvidia 
+    shm_size: 32gb
+    ipc: host
+    volumes:
+      - /home/ubuntu/hislab/stanny:/root/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0,1,2,3

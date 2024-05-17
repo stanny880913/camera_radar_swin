@@ -17,10 +17,14 @@ import re
 import _init_paths
 from lib.my_optimizer import build_optimizer, StepLrUpdater
 from lib.my_data_parallel import MMDataParallel
+from mmcv.parallel import MMDistributedDataParallel
+import torch.distributed as dist
 from lib.my_dataloader import init_data_loader
 from lib.fusion_dataset import NuScenesFusionDataset
 from lib.my_model.radiant_pgd_network import PGDFusion3D
 from scripts.train_dwn import FusionMLP
+
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 this_dir = os.path.dirname(__file__)
 path_config = join(this_dir, "..", "lib", "configs_radiant_pgd.py")
@@ -36,7 +40,6 @@ def freeze_subnet(model, net_names):
                 print("%s.%s was frozen." % (child_name, param_name))
             print("%s was frozen." % child_name)
 
-
 def freeze_cam_heads(model):
     for child_name, child in model.module.named_children():
         if child_name == "bbox_head":
@@ -51,7 +54,6 @@ def freeze_cam_heads(model):
                         )
                 else:
                     print("%s.%s to be trained" % (child_name, module_name))
-
 
 def load_checkpoint(
     model,
@@ -80,7 +82,8 @@ def load_checkpoint(
     """
     checkpoint = _load_checkpoint(filename, map_location, logger)
     if not isinstance(checkpoint, dict):
-        raise RuntimeError(f"No state_dict found in checkpoint file {filename}")
+        raise RuntimeError(
+            f"No state_dict found in checkpoint file {filename}")
     if "state_dict" in checkpoint:
         state_dict = checkpoint["state_dict"]
     else:
@@ -88,17 +91,19 @@ def load_checkpoint(
 
     metadata = getattr(state_dict, "_metadata", OrderedDict())
     for p, r in revise_keys:
-        state_dict = OrderedDict({re.sub(p, r, k): v for k, v in state_dict.items()})
+        state_dict = OrderedDict(
+            {re.sub(p, r, k): v for k, v in state_dict.items()})
     state_dict._metadata = metadata
 
     load_state_dict(model, state_dict, strict, logger)
     return checkpoint
 
-
 def clip_grads(params, grad_clip=dict(max_norm=35, norm_type=2)):
-    params = list(filter(lambda p: p.requires_grad and p.grad is not None, params))
+    params = list(
+        filter(lambda p: p.requires_grad and p.grad is not None, params))
     if len(params) > 0:
         return clip_grad.clip_grad_norm_(params, **grad_clip)
+
 def single_gpu_test(model, model_mlp, data_loader):
     """Test model with single gpu.
 
@@ -116,17 +121,17 @@ def single_gpu_test(model, model_mlp, data_loader):
     prog_bar = mmcv.ProgressBar(len(dataset))
     for i, data in enumerate(data_loader):
         with torch.no_grad():
-            result = model(model_mlp=model_mlp, return_loss=False, rescale=True, **data)
+            result = model(model_mlp=model_mlp,
+                           return_loss=False, rescale=True, **data)
         results.extend(result)
         batch_size = len(result)
         for _ in range(batch_size):
             prog_bar.update()
     return results
 
-
 def train(args, model, train_loader, optimizer, lr_updater, epoch, iter_idx):
     model.train()
-    
+
     # print("without freeze, camera branch will change mono weights!!!!!")
     freeze_subnet(model, ['backbone_img', 'neck_img'])
     freeze_cam_heads(model)
@@ -144,7 +149,7 @@ def train(args, model, train_loader, optimizer, lr_updater, epoch, iter_idx):
         # gt_labels_3d
         # centers2d
         # depths
-        # radar_maㄛp
+        # radar_map
         # radar_pts]
         lr_updater.before_train_iter(optimizer, iter_idx)  # 動態調整lr
         optimizer.zero_grad()  # 清除梯度
@@ -152,6 +157,7 @@ def train(args, model, train_loader, optimizer, lr_updater, epoch, iter_idx):
         outputs = model.train_step(data_batch, optimizer=None)
         loss = outputs["loss"]
         ave_loss += loss.item()
+        torch.cuda.empty_cache()
         loss.backward()  # 反向傳播
         grad_norm = clip_grads(model.parameters())
         optimizer.step()
@@ -163,13 +169,14 @@ def train(args, model, train_loader, optimizer, lr_updater, epoch, iter_idx):
                     batch_idx
                     * len(data_batch["img"].data)
                     * data_batch["img"].data[0].shape[0],
-                    len(train_loader.dataset),
+                    len(train_loader.dataset) // args.samples_per_gpu,
                     100.0 * batch_idx / len(train_loader),
                     loss.item(),
                 ),
                 flush=True,
             )
-            print("grad_norm: {:.4f}".format(grad_norm), "iteration: %d" % iter_idx)
+            print("grad_norm: {:.4f}".format(
+                grad_norm), "iteration: %d" % iter_idx)
             for loss_name, loss_value in outputs["log_vars"].items():
                 print("%s:%.3f " % (loss_name, loss_value), end=" ")
             print("")
@@ -179,7 +186,6 @@ def train(args, model, train_loader, optimizer, lr_updater, epoch, iter_idx):
     print("\nTraining set: Average loss: {:.4f}\n".format(ave_loss))
 
     return dict(loss=ave_loss, iter_idx=iter_idx)
-
 
 def test(args, model, test_loader, epoch=None):
     model.eval()
@@ -224,7 +230,6 @@ def test(args, model, test_loader, epoch=None):
 
     return test_loss
 
-
 def save_arguments(args):
     f = open(join(args.dir_result, "args.txt"), "w")
     f.write(repr(args) + "\n")
@@ -232,12 +237,10 @@ def save_arguments(args):
     out_path = join(args.dir_result, "cfg.py")
     cfg.dump(out_path)
 
-
 def mkdir(dir1):
     if not os.path.exists(dir1):
         os.makedirs(dir1)
         print("make directory %s" % dir1)
-
 
 def filter_state_dict_keys(state_dict):
     new_state_dict = OrderedDict()
@@ -245,7 +248,6 @@ def filter_state_dict_keys(state_dict):
         name = k[7:]
         new_state_dict[name] = v
     return new_state_dict
-
 
 def init_params(args, model, optimizer):
     loss_train = []
@@ -273,7 +275,6 @@ def init_params(args, model, optimizer):
             print("No checkpoint file is found.")
 
     if args.load_pretrained_pgd and start_epoch == 1:
-        print("Load pretrained weights of PGD")
         _ = load_checkpoint(
             model,
             args.path_checkpoint_pgd,
@@ -286,7 +287,6 @@ def init_params(args, model, optimizer):
         )
 
     return loss_train, loss_val, start_epoch, iter_idx, state_dict_best, loss_val_min
-
 
 def save_checkpoint(
     epoch,
@@ -319,7 +319,6 @@ def save_checkpoint(
     torch.save(state, join(args.dir_result, "checkpoint.tar"))
     return state
 
-
 def plot_and_save_loss_curve(epoch, loss_train, loss_val):
     plt.close("all")
     plt.figure()
@@ -332,23 +331,33 @@ def plot_and_save_loss_curve(epoch, loss_train, loss_val):
     plt.ylabel("Loss")
     plt.yscale("log")
     plt.title("loss in logscale")
-    plt.savefig(join(args.dir_result, "loss.png"))
-
+    plt.savefig(join(args.dir_result, "loss_branch.png"))
 
 def init_env():
-    use_cuda = torch.cuda.is_available()
-    device0 = torch.device("cuda:0" if use_cuda else "cpu")
-    cudnn.benchmark = True if use_cuda else False
-    available_gpu_ids = [i for i in range(torch.cuda.device_count())]
+    ddp = True
+    if ddp:
+        dist.init_process_group(backend='nccl')
+        dist.barrier()
+        local_rank = torch.distributed.get_rank()
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
 
-    return device0, available_gpu_ids
+    else:
+        local_rank = None
+        device = torch.device("cuda:1")  # 默认使用 GPU 1
 
+
+    cudnn.benchmark = torch.cuda.is_available()
+
+    available_gpu_ids = list(range(torch.cuda.device_count()))
+    return local_rank, device, available_gpu_ids
 
 def main(args):
     # setting data path
     if args.dir_data == None:
         this_dir = os.path.dirname(__file__)
         args.dir_data = join(this_dir, "..", "data", "nuscenes")
+
     # setting pgd pre-trained modedl
     if args.path_checkpoint_pgd == None:
         this_dir = os.path.dirname(__file__)
@@ -366,42 +375,37 @@ def main(args):
 
     # set train, val, test data
     args.train_ann_file = None
-    args.val_ann_file = join(args.dir_data, "fusion_data", "nus_infos_val.coco.json")
-    args.test_ann_file = join(args.dir_data, "fusion_data", "nus_infos_test.coco.json")
+    args.val_ann_file = join(
+        args.dir_data, "fusion_data", "nus_infos_val.coco.json")
+    # args.test_ann_file = join(args.dir_data, "fusion_data", "nus_infos_test.coco.json")
+    args.test_ann_file = "data/nuscenes/fusion_data/nus_infos_test.coco.json"
+
     # set results path
     if not args.dir_result:
         args.dir_result = join(
             args.dir_data, "fusion_data", "train_result", "radiant_pgd"
         )
-    mkdir(args.dir_result)
+        mkdir(args.dir_result)
 
     save_arguments(args)
-    device, available_gpu_ids = init_env()
+    local_rank, device, available_gpu_ids = init_env()
 
     # if do val or testing
     if args.do_eval:
         cfg.model_args["eval_mono"] = args.eval_mono
         if args.eval_mono:
-            print(
-                "---------------------------------------------------------------------------------"
-            )
-            print("Evaluate cam(mono) outputs")
-            print(
-                "---------------------------------------------------------------------------------"
-            )
+            print("=============== Evaluate cam(mono) outputs ============")
         else:
-            print(
-                "---------------------------------------------------------------------------------"
-            )
-            print("Evaluate fusion outputs")
-            print(
-                "---------------------------------------------------------------------------------"
-            )
+            print("=============== Evaluate fusion outputs ===============")
 
-    # load PGD model
-    model = PGDFusion3D(**cfg.model_args)#這行會進入到model設定以及特徵提取等等
+    distributed = True
+    model = PGDFusion3D(**cfg.model_args)  # 這行會進入到model設定以及特徵提取等等
     model.init_weights()
-    model = MMDataParallel(model.to(device), device_ids=available_gpu_ids)
+    if distributed:
+        model = MMDistributedDataParallel(model.to(device), device_ids=[
+                                          local_rank], output_device=local_rank, find_unused_parameters=True)
+    else:
+        model = MMDataParallel(model.to(device), device_ids=available_gpu_ids)
 
     # training
     if not args.do_eval:
@@ -418,33 +422,27 @@ def main(args):
         ) = init_params(args, model, optimizer)
 
         # set which dataset do you want to train
-        if args.train_mini:
-            args.train_ann_file = join(
-                args.dir_data, "fusion_data", "nus_infos_train_mini.coco.json"
-            )
-        else:
-            args.train_ann_file = join(
-                args.dir_data, "fusion_data", "nus_infos_train.coco.json"
-            )
+        train_suffix = "_mini" if args.train_mini else ""
+        val_suffix = "_mini" if args.val_mini else ""
 
-        if args.val_mini:
-            args.val_ann_file = join(
-                args.dir_data, "fusion_data", "nus_infos_val_mini.coco.json"
-            )
-        else:
-            args.val_ann_file = join(
-                args.dir_data, "fusion_data", "nus_infos_val.coco.json"
-            )
+        args.train_ann_file = join(args.dir_data, "fusion_data", f"nus_infos_train{train_suffix}.coco.json")
+        args.val_ann_file = join(args.dir_data, "fusion_data", f"nus_infos_val{val_suffix}.coco.json") 
+
         # get into dataloader
-        print("Set train loader!!!")
-        train_loader = init_data_loader(args, NuScenesFusionDataset, "train")
-        print("Set val loader")
-        val_loader = init_data_loader(args, NuScenesFusionDataset, "val")
+        print("======================== Set train loader ======================")
+        train_loader, train_data_sampler = init_data_loader(
+            args, NuScenesFusionDataset, "train")
+
+        print("======================== Set val loader ======================")
+        val_loader, val_data_sampler = init_data_loader(
+            args, NuScenesFusionDataset, "val")
 
         lr_updater.before_run(optimizer)
 
         epoch = start_epoch
         while epoch <= args.epochs:
+            train_data_sampler.set_epoch(epoch)
+            val_data_sampler.set_epoch(epoch)
             start = timer()
 
             lr_updater.before_train_epoch(optimizer, epoch)
@@ -481,72 +479,76 @@ def main(args):
             epoch += 1
 
     if args.do_eval:
-        f_checkpoint_mlp = join(
-            args.dir_result,
-            "train_mini",
-            "concat_radar/"
-            "checkpoint_dwn.tar"
-        )
+        # f_checkpoint_mlp = join(args.dir_data, 'fusion_data', 'dwn_radiant_pgd', 'train_result', 'checkpoint.tar')
+        f_checkpoint_mlp = "dir_results/server/ori_server/dwn_data/checkpoint_dwn.tar"
         model_mlp = FusionMLP()
-        checkpoint_mlp = torch.load(f_checkpoint_mlp)
-        model_mlp.load_state_dict(filter_state_dict_keys(checkpoint_mlp["state_dict"]))
+        checkpoint_mlp = torch.load(f_checkpoint_mlp, map_location='cuda:0')
+        model_mlp.load_state_dict(
+            filter_state_dict_keys(checkpoint_mlp['state_dict']))
 
-        data_loader = init_data_loader(args, NuScenesFusionDataset, "test")
-        # f_checkpoint = join(args.dir_result, "pre_checkpoint_branch.tar") 
-        f_checkpoint = join(args.dir_result, "train_mini/concat_radar/checkpoint_branch.tar")
+        print("======================== Set test loader ======================")
+        test_data_loader, test_sampler = init_data_loader(
+            args, NuScenesFusionDataset, 'test')
+
+        # f_checkpoint = join(args.dir_result, 'checkpoint.tar')
+        f_checkpoint = "dir_results/server/ori_server/checkpoint_branch.tar"
         if os.path.isfile(f_checkpoint):
-            print("load model")
-            checkpoint = torch.load(f_checkpoint)
-            model.load_state_dict(checkpoint["state_dict"])
+            print('load model')
+            checkpoint = torch.load(f_checkpoint, map_location='cuda:0')
+            model.load_state_dict(checkpoint['state_dict'])
         else:
-            print("No checkpoint file is found.")
+            print('No checkpoint file is found.')
             return
 
-        outputs = single_gpu_test(model, model_mlp, data_loader)
+        outputs = single_gpu_test(model, model_mlp, test_data_loader)
 
-        eval_file_name = "eval_" + os.path.basename(data_loader.dataset.ann_file)[:-10]
+        eval_file_name = 'eval_' + \
+            os.path.basename(test_data_loader.dataset.ann_file)[:-10]
         if args.eval_mono:
-            out_dir = join(args.dir_result, eval_file_name, "mono")
+            out_dir = join(args.dir_result, eval_file_name, 'mono')
         else:
-            out_dir = join(args.dir_result, eval_file_name, "fusion")
-        print(data_loader.dataset.evaluate(outputs, jsonfile_prefix=out_dir))
-
+            out_dir = join(args.dir_result, eval_file_name, 'fusion')
+        print(test_data_loader.dataset.evaluate(
+            outputs, jsonfile_prefix=out_dir))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--dir_data", type=str)
-    parser.add_argument("--dir_result", type=str, default="dir_results")
-    parser.add_argument("--load_pretrained_pgd", action="store_true", default=True)
+    parser.add_argument("--dir_result", type=str, default="dir_results/server/swin_cft")
+    parser.add_argument("--load_pretrained_pgd",
+                        action="store_true", default=True)
     parser.add_argument(
         "--path_checkpoint_pgd",
         type=str,
-        default="model/pgd_r101_caffe_fpn_gn-head_2x16_2x_nus-mono3d_finetune_20211114_162135-5ec7c1cd.pth"
+        default="/root/workspace/camera_radar_swin_trainval/model/pgd_r101_caffe_fpn_gn-head_2x16_2x_nus-mono3d_finetune_20211114_162135-5ec7c1cd.pth"
     )
-
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument(
         "--resume",
         action="store_true",
-        default=False,
-        help="resume training from checkpoint",
+        default=True,
+        help="resume training from checkpoint"
     )
-    parser.add_argument("--num_gpus", type=int, default=4)
-    parser.add_argument("--samples_per_gpu", type=int, default=2)
+    parser.add_argument("--num_gpus", type=int, default=1)
+    parser.add_argument("--samples_per_gpu", type=int, default=2,
+                        help="Number of training samples on each GPU, i.e.,batch size of each GPU.")
     parser.add_argument("--test_samples_per_gpu", type=int, default=1)
-    parser.add_argument("--workers_per_gpu", type=int, default=2)
+    parser.add_argument("--workers_per_gpu", type=int,
+                        default=2, help="Numworkers sum")
     parser.add_argument("--log_interval", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=None, help="Learning rate")
-    parser.add_argument("--train_mini", action="store_true", default=True)
-    parser.add_argument("--val_mini", type=bool, default=True)
-
+    parser.add_argument("--lr", type=float,
+                        default="0.001", help="Learning rate")
+    parser.add_argument("--train_mini", action="store_true", default=False)
+    parser.add_argument("--val_mini", type=bool, default=False)
     parser.add_argument(
         "--do_eval",
         action="store_true",
-        default= False,
+        default=False,
         help="compute mAP for testing set",
     )
-    parser.add_argument("--eval_set", type=str, default="val", choices=["val", "test"])
+    parser.add_argument("--eval_set", type=str,
+                        default="val", choices=["val", "test"])
     parser.add_argument("--path_checkpoint_dwn", type=str)
     parser.add_argument(
         "--eval_mono",
@@ -554,6 +556,23 @@ if __name__ == "__main__":
         default=False,
         help="compute mAP for camera outputs",
     )
-
+    parser.add_argument("--local_rank", default=1, type=int)
+    parser.add_argument(
+        '--launcher',
+        choices=['none', 'pytorch', 'slurm', 'mpi'],
+        default='none',
+        help='job launcher')
     args = parser.parse_args()
     main(args)
+
+# train : multi-gpu training command(server)
+# python -m torch.distributed.launch --nproc_per_node=4 scripts/train_radiant_pgd.py
+
+# val : multi-gpu doing val and test command(server)
+# python -m torch.distributed.launch --nproc_per_node=1 scripts/train_radiant_pgd.py --do_eal
+
+# test : multi-gpu doing val and test command(server)
+# python -m torch.distributed.launch --nproc_per_node=1 scripts/train_radiant_pgd.py --doeval --eval_set test
+
+# rtx3090 * 2
+# python -m torch.distributed.launch --nproc_per_node=2 scripts/train_radiant_pgd.py

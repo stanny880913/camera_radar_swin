@@ -18,6 +18,7 @@ from lib.my_model.focal_loss import FocalLoss
 from lib.my_model.smooth_l1_loss import SmoothL1Loss
 from lib.my_model.cross_entropy_loss import CrossEntropyLoss
 from lib.my_model.bbox_coder import PGDBBoxCoder
+from lib.my_model.LWA import lwa
 from lib.my_model.swinTransformer import SwinTransformerBlock
 from lib.my_model.mamba_module import TokenSwapMamba, CrossMamba
 
@@ -330,137 +331,49 @@ class SingleStageDetector(BaseDetector):
     #     x_img = self.neck_img(x_img)
     #     swin_x_cat = self.neck_fusion(swin_x_cat)
     #     return x_img, swin_x_cat
-  #INFO Channel Swapping + Cross Modal Mamba
-    # def extract_feat(self, img, radar_map):
-    #         device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
-    #         #img經過backbone 
-    #         # x_img[0].shape=[1,256,232,400]
-    #         # x_img[1].shape=[1,512,116,200]
-    #         # x_img[2].shape=[1,1024,58,100]
-    #         # x_img[3].shape=[1,2048,29,50]
-    #         x_img = self.backbone_img(img)
-
-    #         #radar經過backbone
-    #         # x_other[0].shape=[1,64,232,400]
-    #         # x_other[1].shape=[1,128,116,200]
-    #         # x_other[2].shape=[1,256,58,100]
-    #         # x_other[3].shape=[1,512,29,50]
-    #         x_other = self.backbone_other(radar_map)
-
-    #         radar_up_sample = []
-    #         desired_channels = [256, 512, 1024, 2048]
-    #         for i, x_radar_i in enumerate(x_other):
-    #                 conv = nn.Conv2d(x_radar_i.shape[1], desired_channels[i], kernel_size=1).to(device)
-    #                 output_tensor = conv(x_radar_i)
-    #                 radar_up_sample.append(output_tensor)
-
-    #         x_img = [x.to(device) for x in x_img]
-    #         radar_up_sample = [x.to(device) for x in radar_up_sample]
-
-    #         # INFO 256 channel 
-    #         mamba_fea_list = []
-    #         for i in range(4):
-    #             channel_swap = TokenSwapMamba(x_img[i].shape[1])
-
-    #             img_swap_re, radar_swap_re = channel_swap.forward(x_img[i], radar_up_sample[i])
-                
-    #             feature_add = torch.add(img_swap_re, radar_swap_re)
-    #             input_channels = feature_add.shape[1]
-    #             mamba_block = CrossMamba(input_channels).to(device)
-            
-    #             mamba_output = mamba_block.forward(feature_add, img_swap_re)  
-    #             mamba_fea_list.append(mamba_output)
-                
-            
-    #         #INFO CFMW論文有將channel swapping後的特徵再add回原始特徵
-    #         # img_swap_add_list = []
-    #         # radar_swap_add_list = []
-    #         # for x_i, i_swap in zip(x_img_down_sample, img_swap_list):
-    #         #     img_add_result = torch.add(x_i, i_swap)
-    #         #     img_swap_add_list.append(img_add_result)
-
-    #         # for x_o, o_swap in zip(x_other, radar_swap_list):
-    #         #     radar_add_result = torch.add(x_o, o_swap)
-    #         #     radar_swap_add_list.append(radar_add_result)
-
-    #         # mamba_low_channel_cat = []
-    #         # for i in range(4):
-    #         #     input_channels = img_swap_low_channel_list[i].shape[1]
-    #         #     mamba_block = CrossMamba(input_channels).to(device)
-    #         #     transformed_x = mamba_block.forward(img_swap_low_channel_list[i], radar_swap_low_channel_list[i])  
-    #         #     mamba_low_channel_cat.append(transformed_x)
-
-    #         cross_modal_mamba_add = []
-    #         for x_i, x_o in zip(mamba_fea_list, radar_up_sample):
-    #             cross_modal_mamba_add.append(torch.add(x_i, x_o)) 
-            
-    #         cs_mamba_down_sample = []
-    #         desired_channels = [64, 128, 256, 512]
-    #         for i, x_radar_i in enumerate(cross_modal_mamba_add):
-    #             conv = nn.Conv2d(x_radar_i.shape[1], desired_channels[i], kernel_size=1).to(device)
-    #             output_tensor = conv(x_radar_i)
-    #             cs_mamba_down_sample.append(output_tensor)
-
-    #         x_cat = []
-    #         for x_i, x_o in zip(x_img, cs_mamba_down_sample):
-    #             x_cat.append(torch.cat([x_i, x_o], dim=1))
-
-    #         for i in range(3):
-    #             x_cat[i+1] = self.fusion_convs[i](x_cat[i+1])
-                            
-    #         x_img = self.neck_img(x_img)
-    #         x_cat = self.neck_fusion(x_cat)
-                    
-    #         return x_img, x_cat
-
-     #INFO 特徵提取 swin + cft_method
+ #INFO lwa_ad 
     def extract_feat(self, img, radar_map):
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
-
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         x_img = self.backbone_img(img)
-        x_other = self.backbone_other(radar_map)
-        
-        radar_up_sample = []
-        desired_channels = [256, 512, 1024, 2048]
-        for i, x_radar_i in enumerate(x_other):
-                conv = nn.Conv2d(x_radar_i.shape[1], desired_channels[i], kernel_size=1).to(device)
-                output_tensor = conv(x_radar_i)
-                radar_up_sample.append(output_tensor)
 
-        # INFO use swin transformer to fuse data(concat one output)
-        swin_fea_list = [] 
-        for (x_i, x_o) in zip(x_img, radar_up_sample):
-            x_add=torch.add(x_i, x_o)
-            input_channels = output_channels = x_add.shape[1]
-            swin_block = SwinTransformerBlock(input_channels, output_channels).to(device)
-            swin_output = swin_block.forward(x_add.to(device))
-            swin_fea_list.append(swin_output)
-    
-        # concat swin feature to radar branch
-        swin_branch_radar = []
-        for origin_radar, r_swin in zip(radar_up_sample, swin_fea_list):
-            radar_concat = torch.add(origin_radar, r_swin)
-            swin_branch_radar.append(radar_concat)
-
-        radar_down_sample = []
+        x_img_down_sample_resize = []
         desired_channels = [64, 128, 256, 512]
-        for i, x_radar_i in enumerate(swin_branch_radar):
-                conv = nn.Conv2d(x_radar_i.shape[1], desired_channels[i], kernel_size=1).to(device)
-                output_tensor = conv(x_radar_i)
-                radar_down_sample.append(output_tensor)
+        for i, x_img_i in enumerate(x_img):
+                conv = nn.Conv2d(x_img_i.shape[1], desired_channels[i], kernel_size=1).to(device)
+                output_tensor = conv(x_img_i)
+                new_img_height = output_tensor.shape[2] // 2
+                new_img_width = output_tensor.shape[3] // 2
+                output_tensor_resize = F.interpolate(output_tensor, size=(new_img_height, new_img_width), mode='bilinear', align_corners=False)
+                x_img_down_sample_resize.append(output_tensor_resize)
 
-        # concat 2 branch feature
-        swin_cat = []
-        for final_img, final_radar in zip(x_img, radar_down_sample):
-            swin_cat.append(torch.cat([final_img, final_radar], dim=1))
-    
+        x_other = self.backbone_other(radar_map)
+        x_other_resize = [F.interpolate(x_o, size=(x_o.shape[2] // 2, x_o.shape[3] // 2), mode='bilinear', align_corners=False) for x_o in x_other]
+
+        lambalwa = lwa(64,4).to(device)
+        lwa_i = x_img_down_sample_resize[0].to(device)
+        lwa_o = x_other_resize[0].to(device)
+        xxlambaLWA = lambalwa(lwa_i, lwa_o)
+
+        x_cat = []
+        for xx, (x_i, x_o) in enumerate(zip(x_img, x_other)):
+            # lwa_lamba = x_o * xxlambaLWA[:,xx:xx+1,:,:] 
+            x_cat.append(torch.add(x_i,lwa_x_other, value=lwa_lamba))
+
+        # swin_x_cat = []
+        # for i in range(4):
+        #     input_channels = x_cat[i].shape[1]
+        #     output_channels = input_channels
+        #     swin_block = SwinTransformerBlock(input_channels, output_channels).to(device)
+        #     transformed_x = swin_block.forward(x_cat[i].to(device))  
+        #     swin_x_cat.append(transformed_x)
+
         for i in range(3):
-            swin_cat[i+1] = self.fusion_convs[i](swin_cat[i+1])
+            swin_x_cat[i+1] = self.fusion_convs[i](swin_x_cat[i+1])
+
 
         x_img = self.neck_img(x_img)
-        swin_cat = self.neck_fusion(swin_cat)
-
-        return x_img, swin_cat
+        swin_x_cat = self.neck_fusion(swin_x_cat)
+        return x_img, swin_x_cat
 
     def forward_dummy(self, img):
         """Used for computing network flops.

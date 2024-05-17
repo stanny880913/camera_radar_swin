@@ -9,10 +9,13 @@ from torch.utils.data.dataloader import default_collate
 from torch.utils.data import Sampler
 from mmcv.parallel.data_container import DataContainer
 from mmcv.runner import get_dist_info
+from torch.utils.data.distributed import DistributedSampler
+
+# INFO prepare dwn data will come into this function
 
 
 def init_data_loader_from_file(args, dataset_class, ann_file):
-    
+
     args_dataset = {'ann_file': ann_file,
                     'data_root': args.dir_data,
                     'mode': 'train'}
@@ -21,15 +24,15 @@ def init_data_loader_from_file(args, dataset_class, ann_file):
                         'num_gpus': args.num_gpus,
                         'shuffle': False,
                         'seed': args.seed}
-    dataset = dataset_class(**args_dataset)    
-    
-    data_loader = build_dataloader(dataset, **args_data_loader)
-    
+    dataset = dataset_class(**args_dataset)
+
+    data_loader = build_dwn_data_dataloader(dataset, **args_data_loader)
+
     return data_loader
 
 
 def init_data_loader(args, dataset_class, mode):
-    
+
     if mode == 'train':
         ann_file = args.train_ann_file
         nus_version = 'v1.0-trainval'
@@ -48,7 +51,7 @@ def init_data_loader(args, dataset_class, mode):
             ann_file = args.val_ann_file
             nus_version = 'v1.0-trainval'
         elif args.eval_set == 'test':
-            ann_file = args.test_ann_file 
+            ann_file = args.test_ann_file
             nus_version = 'v1.0-test'
         samples_per_gpu = args.test_samples_per_gpu
         shuffle = False
@@ -61,7 +64,7 @@ def init_data_loader(args, dataset_class, mode):
                 use_external=False)
         else:
             modality = None
-            
+
     args_dataset = {'ann_file': ann_file,
                     'data_root': args.dir_data,
                     'modality': modality,
@@ -72,11 +75,12 @@ def init_data_loader(args, dataset_class, mode):
                         'num_gpus': args.num_gpus,
                         'shuffle': shuffle,
                         'seed': args.seed}
-    dataset = dataset_class(**args_dataset)    
-    
-    data_loader = build_dataloader(dataset, **args_data_loader)
-    
-    return data_loader
+    dataset = dataset_class(**args_dataset)
+
+    data_loader, data_sampler = build_dataloader(
+        dataset, distributed=True, drop_last=True, **args_data_loader)
+
+    return data_loader, data_sampler
 
 
 def build_dataloader(dataset,
@@ -85,6 +89,8 @@ def build_dataloader(dataset,
                      num_gpus=1,
                      shuffle=True,
                      seed=None,
+                     distributed=None,
+                     drop_last=False,
                      **kwargs):
     """Build PyTorch DataLoader.
 
@@ -105,13 +111,85 @@ def build_dataloader(dataset,
     Returns:
         DataLoader: A PyTorch dataloader.
     """
-    rank, world_size = get_dist_info()   
+    rank, world_size = get_dist_info()
+    distributed = True 
+    batch_size = num_gpus * samples_per_gpu if distributed else 1
+    num_workers = num_gpus * workers_per_gpu if distributed else 1
+    if distributed:
+        print("======================= INTO DistributedSampler ==================")
+        data_sampler = DistributedSampler(
+            dataset, world_size, rank, shuffle=True)
+        
+        init_fn = partial(
+            worker_init_fn, num_workers=num_workers, rank=rank,
+            seed=seed) if seed is not None else None
+        
+        data_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=data_sampler,
+            num_workers=num_workers,
+            collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
+            pin_memory=False,
+            worker_init_fn=init_fn,
+            drop_last=drop_last,
+            **kwargs)
+    else:
+        print("======================= INTO GroupSampler ==================")
+        data_sampler = GroupSampler(
+            dataset, samples_per_gpu) if shuffle else None
+        
+        init_fn = partial(
+            worker_init_fn, num_workers=num_workers, rank=rank,
+            seed=seed) if seed is not None else None
+        
+        data_loader = DataLoader(
+            dataset,
+            batch_size=batch_size,
+            sampler=data_sampler,
+            num_workers=num_workers,
+            collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
+            pin_memory=False,
+            worker_init_fn=init_fn,
+            drop_last=True,
+            **kwargs)
+
+    return data_loader, data_sampler
+
+
+def build_dwn_data_dataloader(dataset,
+                              samples_per_gpu,
+                              workers_per_gpu,
+                              num_gpus=1,
+                              shuffle=True,
+                              seed=None,
+                              **kwargs):
+    """Build PyTorch DataLoader.
+
+    In distributed training, each GPU/process has a dataloader.
+    In non-distributed training, there is only one dataloader for all GPUs.
+
+    Args:
+        dataset (Dataset): A PyTorch dataset.
+        samples_per_gpu (int): Number of training samples on each GPU, i.e.,
+            batch size of each GPU.
+        workers_per_gpu (int): How many subprocesses to use for data loading
+            for each GPU.
+        num_gpus (int): Number of GPUs. Only used in non-distributed training (run across multiple machines).
+        shuffle (bool): Whether to shuffle the data at every epoch.
+            Default: True.
+        kwargs: any keyword argument to be used to initialize DataLoader
+
+    Returns:
+        DataLoader: A PyTorch dataloader.
+    """
+    rank, world_size = get_dist_info()
 
     sampler = GroupSampler(dataset, samples_per_gpu) if shuffle else None
-    batch_size = num_gpus * samples_per_gpu  
-    num_workers = num_gpus * workers_per_gpu 
-    # batch_size = 1
-    # num_workers = 1
+    # batch_size = num_gpus * samples_per_gpu
+    # num_workers = num_gpus * workers_per_gpu
+    batch_size = 1
+    num_workers = 1
 
     init_fn = partial(
         worker_init_fn, num_workers=num_workers, rank=rank,
@@ -123,8 +201,9 @@ def build_dataloader(dataset,
         sampler=sampler,
         num_workers=num_workers,
         collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
-        pin_memory=False,    
-        worker_init_fn=init_fn,  
+        pin_memory=False,
+        worker_init_fn=init_fn,
+        drop_last=True,
         **kwargs)
 
     return data_loader
@@ -142,8 +221,8 @@ class GroupSampler(Sampler):
         assert hasattr(dataset, 'flag')
         self.dataset = dataset
         self.samples_per_gpu = samples_per_gpu
-        self.flag = dataset.flag.astype(np.int64)  
-        self.group_sizes = np.bincount(self.flag)  
+        self.flag = dataset.flag.astype(np.int64)
+        self.group_sizes = np.bincount(self.flag)
         self.num_samples = 0
         for i, size in enumerate(self.group_sizes):
             self.num_samples += int(np.ceil(
@@ -177,7 +256,7 @@ class GroupSampler(Sampler):
         return self.num_samples
 
 
-def collate(batch, samples_per_gpu=1): 
+def collate(batch, samples_per_gpu=1):
     """Puts each data field into a tensor/DataContainer with outer dimension
     batch size.
     Extend default_collate to add support for
@@ -249,4 +328,3 @@ def collate(batch, samples_per_gpu=1):
         }
     else:
         return default_collate(batch)
-

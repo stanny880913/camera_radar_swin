@@ -495,7 +495,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     '--root-path',
     type=str,
-    default='./data/nuscenes',
+    default='data/nuscenes',
     help='specify the root path of dataset')  
 parser.add_argument(
     '--version',

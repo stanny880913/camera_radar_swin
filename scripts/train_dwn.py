@@ -14,7 +14,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Dataset
 from sklearn.metrics import average_precision_score
+from mmcv.parallel import MMDistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
+from mmcv.runner import get_dist_info
+import torch.distributed as dist
 
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
 
 def train(args, model, train_loader, optimizer, epoch):
     
@@ -39,7 +44,6 @@ def train(args, model, train_loader, optimizer, epoch):
     ave_loss/=len(train_loader)
     print('\nTraining set: Average loss: {:.4f}\n'.format(ave_loss))    
     return ave_loss
-
 
 def test(model, test_loader):
     model.eval()
@@ -69,7 +73,6 @@ def test(model, test_loader):
     print('\nValdation set: Average loss: {:.4f}\n'.format(test_loss))
     
     return test_loss
-
 
 class FusionDataset(Dataset):
     def __init__(self, path_list):
@@ -105,10 +108,9 @@ class FusionDataset(Dataset):
         sample = dict(data_in=data_in, gt=gt)
         
         return sample
-
+    # INFO 定義DWN模型架構
 
 class FusionMLP(nn.Module):
-    # INFO 定義DWN模型架構
     def __init__(self):
         super().__init__()
 
@@ -122,7 +124,29 @@ class FusionMLP(nn.Module):
         x = F.relu(self.fc2(x))
         x = F.relu(self.fc3(x))
         return self.fc4(x)
-    
+
+# INFO 定義DWN+BatchNorm1d+L2正規化+dropout
+# class FusionMLP(nn.Module):
+#     def __init__(self, l2_reg=0.001):
+#         super().__init__()
+#         self.fc1 = nn.Linear(16, 128)
+#         self.bn1 = nn.BatchNorm1d(128)  
+#         self.fc2 = nn.Linear(128, 128)
+#         self.bn2 = nn.BatchNorm1d(128)  
+#         self.fc3 = nn.Linear(128, 64)
+#         self.bn3 = nn.BatchNorm1d(64)  
+#         self.fc4 = nn.Linear(64, 32)
+#         self.bn4 = nn.BatchNorm1d(32)  
+#         self.fc5 = nn.Linear(32, 1)
+#         self.l2_reg = l2_reg
+
+#     def forward(self, x):
+#         x = F.relu(self.bn1(self.fc1(x)))  
+#         x = F.relu(self.bn2(self.fc2(x))) 
+#         x = F.relu(self.bn3(self.fc3(x))) 
+#         x = F.relu(self.bn4(self.fc4(x))) 
+#         x = self.fc5(x)
+#         return x
 
 def cal_loss(output, gt):
     
@@ -143,9 +167,7 @@ def cal_loss(output, gt):
     
     criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)   
     loss = criterion(output, label)
-    # return 0 or 1
     return loss
-
 
 def cal_metrics(output, gt):
     gt = gt.to(output.device)
@@ -188,15 +210,19 @@ def cal_metrics(output, gt):
                 error_best = error_best.item(),
                 error_prd = error_prd.item())
 
- 
-def init_env():    
-    use_cuda = torch.cuda.is_available()    
-    device0 = torch.device('cuda:0' if use_cuda else 'cpu')    
-    cudnn.benchmark = True if use_cuda else False
-    available_gpu_ids = [i for i in range(torch.cuda.device_count())]
-    
-    return device0, available_gpu_ids  
+def init_env():
+    ddp = True
+    if ddp:
+        local_rank = torch.distributed.get_rank()
+        torch.cuda.set_device(local_rank)
+    else:
+        local_rank = None
 
+    device = torch.device("cuda", local_rank) if ddp else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cudnn.benchmark = torch.cuda.is_available()
+
+    available_gpu_ids = list(range(torch.cuda.device_count()))
+    return local_rank, device, available_gpu_ids
     
 def init_params(args, model, optimizer):
     loss_train=[]
@@ -207,7 +233,7 @@ def init_params(args, model, optimizer):
     loss_val_min = None
         
     if args.resume == True:
-        f_checkpoint = join(args.dir_result, 'checkpoint.tar')        
+        f_checkpoint = join(args.dir_result, 'checkpoint_dwn.tar')        
         if os.path.isfile(f_checkpoint):
             print('Resume training')
             checkpoint = torch.load(f_checkpoint)   
@@ -223,30 +249,36 @@ def init_params(args, model, optimizer):
             print('No checkpoint file is found.')
     return loss_train, loss_val, start_epoch, state_dict_best, loss_val_min
 
-
 def mkdir(dir1):
     if not os.path.exists(dir1): 
         os.makedirs(dir1)
         print('make directory %s' % dir1)
 
-
 def plot_and_save_loss_curve(args, epoch, loss_train, loss_val):
     plt.close('all')
-    plt.figure()  
-    t=np.arange(epoch+1)
-    plt.plot(t,loss_train,'b.-')
-    plt.plot(t,loss_val,'r.-')
+    plt.figure()
+    t = np.arange(epoch + 1)
+
+    # Convert tensors to numpy arrays, ensuring they are on CPU first
+    loss_train_cpu = [x.cpu().numpy() if isinstance(x, torch.Tensor) else x for x in loss_train]
+    loss_val_cpu = [x.cpu().numpy() if isinstance(x, torch.Tensor) else x for x in loss_val]
+
+    plt.plot(t, loss_train_cpu, 'b.-')
+    plt.plot(t, loss_val_cpu, 'r.-')
+
     plt.grid()
-    plt.legend(['training loss','val loss'],loc='best')
+    plt.legend(['Training Loss', 'Validation Loss'], loc='best')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('loss')
-    plt.savefig(join(args.dir_result, 'loss.png'))
+    plt.title('Loss Curve')
+
+    # Save the figure. Ensure the directory exists or handle exceptions appropriately
+    plt.savefig(join(args.dir_result, 'loss_dwn.png'))
 
 
 def save_checkpoint(epoch, model, optimizer, loss_train, loss_val, loss_val_min, state_dict_best, args):
-   
     if epoch == 0 or loss_val[-1] < loss_val_min:
+        print("into here")
         loss_val_min = loss_val[-1]
         state_dict_best = copy.deepcopy( model.state_dict() )
       
@@ -260,11 +292,14 @@ def save_checkpoint(epoch, model, optimizer, loss_train, loss_val, loss_val_min,
     torch.save(state, join(args.dir_result, 'checkpoint_dwn.tar'))
     return loss_val_min, state_dict_best
 
-
 def main(args):
+    torch.distributed.init_process_group(backend="nccl") # 初始化进程组
+    dist.barrier() #等待所有GPU运行，同步所有进程
+
     if args.dir_data == None:
         this_dir = os.path.dirname(__file__)
-        args.dir_data = join(this_dir, '..', 'data', 'nuscenes', 'fusion_data', 'dwn_radiant_pgd')
+        # args.dir_data = join(this_dir, '..', 'data', 'nuscenes', 'fusion_data', 'dwn_radiant_pgd')
+        args.dir_data = "/workspace/camera_radar_swin_trainval/dir_results/lwa/dwn_data"
     
     if not args.dir_result:
         args.dir_result = join(args.dir_data, 'train_result')              
@@ -275,23 +310,46 @@ def main(args):
     # train_ann_files = [join(args.dir_data, 'train_mini.json')] 
     # val_ann_files = [join(args.dir_data, 'val_mini.json')]
     
-    device0, available_gpu_ids = init_env()
+    local_rank, device, available_gpu_ids = init_env()
     args.num_gpus = len(available_gpu_ids)
     print('%d GPUs' % args.num_gpus)
     
-    if not args.do_eval:
-        train_loader = DataLoader(dataset = FusionDataset(train_ann_files),
-                          batch_size = args.num_gpus * args.samples_per_gpu,
-                        shuffle = True,
-                          num_workers = args.num_gpus * args.workers_per_gpu)
-       
-    val_loader = DataLoader(dataset = FusionDataset(val_ann_files),
+    rank, world_size = get_dist_info()   
+
+    print("===================== setting Fusion Dataset =====================")
+    train_dataset = FusionDataset(train_ann_files)
+    val_dataset = FusionDataset(val_ann_files)
+
+    print("===================== setting DistributedSampler =====================")
+    train_sampler = DistributedSampler(train_dataset, world_size, rank, shuffle=True) 
+    val_sampler = DistributedSampler(val_dataset, world_size, rank, shuffle=True) 
+ 
+
+    print("===================== setting train dataloader =====================")
+    train_loader = DataLoader(dataset = train_dataset,
+                        batch_size = args.num_gpus * args.samples_per_gpu,
+                        shuffle = False,
+                        num_workers = args.num_gpus * args.workers_per_gpu,
+                        sampler=train_sampler)
+    print("===================== setting val dataloader =====================")
+    val_loader = DataLoader(dataset = val_dataset,
                             batch_size = args.num_gpus * args.samples_per_gpu,
                             shuffle = False,
-                            num_workers = args.num_gpus * args.workers_per_gpu)
+                            num_workers = args.num_gpus * args.workers_per_gpu,
+                            sampler=val_sampler)
     
-    model = FusionMLP()
-    model = torch.nn.DataParallel(model.to(device0), device_ids=available_gpu_ids)
+    distributed = True
+    if distributed:
+        model = FusionMLP()
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        model = model.to(device)
+        model = MMDistributedDataParallel(model, device_ids=[
+                                          local_rank], output_device=local_rank, find_unused_parameters=True)
+
+    else:
+        model = FusionMLP()
+        model = torch.nn.DataParallel(model.to(device), device_ids=available_gpu_ids)
+
         
     if not args.do_eval:
         optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -300,7 +358,9 @@ def main(args):
             init_params(args, model, optimizer)
           
         for epoch in range(start_epoch, args.epochs):
-        
+            train_sampler.set_epoch(args.epochs)
+            val_sampler.set_epoch(args.epochs) 
+
             start = timer() 
             
             loss_train.append(train(args, model, train_loader, optimizer, epoch))                  
@@ -330,18 +390,26 @@ def main(args):
     
 if __name__ == '__main__': 
     parser = argparse.ArgumentParser()    
-    parser.add_argument('--dir_data', type=str)
-    parser.add_argument("--dir_result", type=str, default="dir_results")
+    parser.add_argument('--dir_data', type=str, default="dir_results/server/ori_server/dwn_data")
+    parser.add_argument("--dir_result", type=str, default="dir_results/server/ori_server/dwn_data")
     parser.add_argument('--epochs', type=int, default=200) 
     parser.add_argument('--resume', action='store_true', default=False, help='resume training from checkpoint')    
     parser.add_argument('--seed', type=int, default=0)
-    parser.add_argument('--num_gpus', type=int, default=1)
+    parser.add_argument('--num_gpus', type=int, default=4)
     parser.add_argument('--samples_per_gpu', type=int, default=256)  
     parser.add_argument('--workers_per_gpu', type=int, default=2) 
     parser.add_argument('--lr', type=float, default=0.0001, help='Learning rate')
     parser.add_argument('--log_interval', type=int, default=100)   
     parser.add_argument('--do_eval', action='store_true', default=False)
-
+    parser.add_argument("--local_rank", default=1, type=int)
+    parser.add_argument(
+        '--launcher',
+        choices=['none', 'pytorch', 'slurm', 'mpi'],
+        default='none',
+        help='job launcher')
     args = parser.parse_args()
 
     main(args)
+
+# run multi gpu command 
+# python -m torch.distributed.launch --nproc_per_node=4 scripts/train_dwn.py 

@@ -82,6 +82,3 @@ class MMDataParallel(DataParallel):
         assert len(self.device_ids) == 1
         inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
         return self.module.create_data_step(*inputs[0], **kwargs[0])
-        
-    
-    
